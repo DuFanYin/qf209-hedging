@@ -193,6 +193,13 @@ The generator matches the volatility level, the leverage effect and the size of 
 
 *Figure 4b. Five generated paths.*
 
+What the AI hedger is told to improve. On each training path the hedger sells the call, takes the premium, and holds some amount of the underlying each day. At expiry we compare two numbers:
+
+- y, what it must pay: the call's payoff, max(S_T − K, 0).
+- ŷ, what it has: the premium (about 2.3), plus the gains and losses on its daily holdings, minus trading costs. This is the hedger's attempt to reproduce y.
+
+The gap ŷ − y is the hedging error, and y − ŷ is the loss. The hedger is told one thing: make the average loss over the worst 5% of paths (CVaR 95) as small as possible. It is not told to copy delta, and it is not trained on RMSE. Because costs are inside ŷ, it learns by itself when a trade is not worth making. Every hedger below uses the same network, the same objective and the same 800 training steps; only the paths it learns from differ. So any difference between them in the table comes from the world it was trained in. (Section 1 has the inputs, the network and the formula.)
+
 Transfer test. A deep hedger is trained in each world (all fitted to the same history); then every strategy is tested on 5,000 fresh paths of the simulated test market, hedging daily at 5 bp:
 
 | Strategy | RMSE | CVaR 95% | Turnover |
