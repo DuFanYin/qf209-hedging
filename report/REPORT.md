@@ -4,7 +4,7 @@ QF209 · A5 Derivative Hedging Strategies
 
 ## Summary
 
-A bank that sells an option hedges it by trading the underlying and, sometimes, a second option. Black–Scholes makes the hedge exact under continuous trading, zero costs and a correct model. We measure how much each of the three failures costs and which hedges cope best. We sell a one-month at-the-money call and hedge it to expiry in four settings that add one source of error at a time: Black–Scholes (W1), Heston (W2), paths from a neural-network generator fitted to a price history (W3), and real S&P 500 (SPX) options from 2005 to 2025 (W4). In each we compare the classical hedges with a deep hedger.
+A bank that sells an option hedges it by trading the underlying and, sometimes, a second option. Black–Scholes makes the hedge exact under continuous trading, zero costs and a correct model. We measure how much each of the three failures costs and which hedges cope best. We sell a one-month at-the-money call and hedge it to expiry in four settings that add one source of error at a time: Black–Scholes (W1), Heston (W2), paths from a neural-network generator fitted to a price history (W3), and real S&P 500 (SPX) options from 2005 to 2025 (W4). In each we compare the classical hedges; in W3 and W4 we also compare them with deep hedgers, neural networks trained to hedge.
 
 Discrete hedging costs what theory predicts: without costs the delta hedge's error falls with the square root of the number of rebalances, within 3% of the Derman–Kamal formula. Costs create an optimal rebalancing frequency, about 26, 6 and 2 times a day at 1, 5 and 10 bp. Model misspecification is the largest source of tail risk. On real SPX, daily delta hedging has an RMSE of 0.64% of the index against 0.37% in the Black–Scholes world at the same frequency and costs, and its CVaR 95% doubles, from 0.96% to 1.94%.
 
@@ -111,7 +111,7 @@ Loss: the negative log-likelihood of the label, −mean ln p̂(yₜ | x₁, …,
 
 Training: random 128-day windows from the training part of the history, 64 windows per step, 800 steps of Adam at a learning rate of 0.001, with gradient clipping. The last 20% of the training history is held out, and we keep the weights with the lowest loss on it (early stopping). On real data, all of this uses only days before the test period.
 
-Making a path: the network first reads a random 60-day stretch of the real history, to start in a realistic volatility regime. Then it draws one day at a time from its predicted distribution and feeds the drawn day back in as the next input. Prices come from adding up the drawn returns, starting at 100, and implied volatility from adding up the drawn changes. This gives the 20,000 one-month paths of W3.
+Making a path: the network first reads a random 60-day stretch of the history it was trained on, to start in a realistic volatility regime. Then it draws one day at a time from its predicted distribution and feeds the drawn day back in as the next input. Prices come from adding up the drawn returns, starting at 100, and implied volatility from adding up the drawn changes. This gives the 20,000 one-month paths of W3.
 
 ### Fair comparisons
 
@@ -279,7 +279,7 @@ Daily delta hedging removes about three-quarters of the risk of not hedging (0.5
 
 ### Transfer test on the real test period
 
-All strategies on the 291 test trades, daily, 5 bp:
+The deep hedgers are trained exactly as in section 4, with the same target (the CVaR 95 of y − ŷ), but W1, W2 and W3 are now fitted to SPX before June 2019. The hedger trained in the simulated test market is kept as a check: that market was never fitted to SPX. All strategies on the 291 test trades, daily, 5 bp:
 
 | Strategy | RMSE | CVaR 95% | Turnover |
 |---|---|---|---|
