@@ -25,9 +25,10 @@ src/hedging/
     generator.py            mixture density network generator (W3)
     real.py                 SPX data loading and episode construction (W4)
     experiments.py          experiment runners used by the notebooks
+scripts/pull_spx_*.py       download the SPX data from WRDS (needs a WRDS account)
 scripts/prepare_wrds.py     converts the WRDS download into the CSV files real.py reads
 results/                    tables (CSV) and figures (PNG)
-tests/                      unit tests
+tests/                      unit tests; test_wrds_scripts.py runs the download scripts on a fake WRDS database
 data/                       WRDS data, not in the repository
 ```
 
@@ -47,7 +48,7 @@ Notebooks 01–03 are simulated with fixed seeds and need no data. Each takes a 
 uv run jupyter nbconvert --to notebook --execute --inplace notebooks/0*.ipynb
 ```
 
-Notebook 04 needs the WRDS data. Unzip `spx_wrds_data.zip` and `options_0_70dte_band30.zip` into `data/raw/`, then:
+Notebook 04 needs the WRDS data. Either unzip `spx_wrds_data.zip` and `options_0_70dte_band30.zip` into `data/raw/`, or download it again with a WRDS account (next section). Then:
 
 ```bash
 uv run python scripts/prepare_wrds.py data/raw/spx_wrds_data data/raw/options_0_70dte_band30
@@ -58,6 +59,28 @@ This writes `data/history.csv`, `data/options.csv` and `data/surface.csv` (about
 ## Data (W4)
 
 WRDS, OptionMetrics IvyDB US, S&P 500 index (secid 108105), 3 January 2005 to 29 August 2025.
+
+### Downloading it
+
+The scripts in `scripts/` pulled the data. They need a WRDS account with OptionMetrics access; `wrds` asks for the username and password the first time, or reads `~/.pgpass`. Files that already exist are skipped, so a script that stops can simply be run again. Run them from the repository root:
+
+```bash
+uv run --with wrds python scripts/pull_spx_wrds.py
+uv run --with wrds python scripts/pull_spx_options_0_70_band30.py --count
+uv run --with wrds python scripts/pull_spx_options_0_70_band30.py
+uv run --with wrds python scripts/pull_spx_options_0_70_band30.py --check
+```
+
+| Script | Writes | Notes |
+|---|---|---|
+| `pull_spx_wrds.py` | `data/raw/spx_wrds_data/`: prices, dividend yield, zero curve, forwards, volatility surface, and options with 20–50 days to expiry | the first download; about 360 MB |
+| `pull_spx_options_0_70_band30.py` | `data/raw/options_0_70dte_band30/`: options with 0–70 days to expiry, strikes within ±30% | the option prices the report uses; `--count` first shows the size, `--check` spot-checks five dates; about 220 MB |
+| `pull_spx_options_0_70.py` | `data/raw/options_0_70dte/`: the same with strikes within ±10% | an earlier version; a 10% band loses the hedged strike after large falls |
+| `pull_spx_forwards.py` | `data/raw/spx_wrds_data/spx_forwards.parquet` | only if the forwards step of `pull_spx_wrds.py` failed; forwards are not used |
+
+We cannot reach WRDS from the test machine, so `tests/test_wrds_scripts.py` checks the scripts another way. It builds a small DuckDB database with the same library, table and column names as OptionMetrics, filled with a year of made-up SPX quotes, and gives the scripts a fake `wrds` connection to it. The scripts run their real SQL unchanged. The tests check that each script writes the right files and applies its filters (days to expiry, strike band, SPX only), that `--count`, `--check` and `--install` work, and that the downloaded files go through `prepare_wrds.py` and `hedging.real` to a delta hedge, as in notebook 04.
+
+### Files
 
 | File | Contents | Used for |
 |---|---|---|
