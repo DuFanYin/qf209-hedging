@@ -39,7 +39,79 @@ The hedging error of one trade is premium received − payoff + gains on the hed
 - Whalley–Wilmott: trade only when the holding drifts outside a band around delta, and then only back to the edge of the band.
 - Delta–gamma / delta–vega: also hold the second option, sized to cancel the first option's gamma (or vega), then delta-hedge what is left.
 - Heston delta (W2 only): the delta of the true W2 model.
-- Deep hedger (Buehler et al., 2019): a small neural network (two layers of 64 units) that decides how much of the underlying to hold each day from the time left, how far the price is from the strike, the implied volatility, the Black–Scholes delta and its current holding. It starts from delta and learns a correction that minimises the CVaR of the hedging error after costs. It trades only the underlying.
+- Deep hedger (Buehler et al., 2019): a small neural network that decides how much of the underlying to hold each day. It starts from delta and learns a correction. It trades only the underlying. Details below.
+
+### The two neural networks
+
+The project uses two networks. The generator learns how a market moves and makes new price paths (W3). The deep hedger learns how to hedge on those paths. They are trained in different ways. The generator learns from labelled data in the usual way: it sees the past and is scored on what happened next. The deep hedger has no label for the right holding on each day, since that is the thing we are trying to find; it is scored on the result at the end of the month.
+
+```
+daily history (price, 30-day ATM IV)
+        │
+        ▼
+generator: GRU + mixture of normals        learns tomorrow's (return, IV change) from the past
+        │
+        ▼
+20,000 new one-month paths (W3)            also W1 and W2 paths, for comparison
+        │
+        ▼
+deep hedger: 5 → 64 → 64 → 1 network       learns a daily holding that minimises CVaR 95%
+        │
+        ▼
+tested on paths or real trades it has never seen
+```
+
+#### Deep hedger
+
+At each rebalance (once a day, 21 times over the option's life) the network looks at one path and reads five numbers:
+
+| Input | Formula | What it tells the network |
+|---|---|---|
+| Time left | τ / T | 1 at the start, 0 at expiry |
+| Scaled moneyness | ln(S / K) / (σ √T) | how far the price is from the strike, in units of a typical one-month move |
+| Implied volatility | σ | the option's implied volatility today |
+| Black–Scholes delta | N(d₁) at σ | the textbook hedge, used as the starting point |
+| Current holding | φ before the trade | lets it skip small trades that cost more than they save |
+
+S is the price, K the strike, τ the time left in years and T = 21 trading days. The inputs are scaled so each is of order one, which makes training stable.
+
+Output: one number c, a correction to delta. The new holding is φ = N(d₁) + c units of the underlying. The network is a plain feed-forward net, 5 inputs → 64 → 64 → 1 output, with SiLU activations in the hidden layers. The same weights are used on every day of every path. The output layer starts at zero, so before training the deep hedger is exactly the delta hedge; training only moves it away from delta if that lowers the loss.
+
+What y, ŷ and the target are. There is no "correct holding" to compare each day's output with. The label is at the level of a whole path:
+
+- y is what the bank must pay at expiry: the call's payoff, max(S_T − K, 0). Once a path is drawn, y is known.
+- ŷ is what the bank has at expiry from selling and hedging: ŷ = premium + Σᵢ φᵢ (Sᵢ₊₁ − Sᵢ) − trading costs. It is built from the network's 21 decisions on that path, so it plays the role of the network's prediction of y.
+- The hedging error is ŷ − y, the same number we report everywhere (see Notation and units). A perfect hedge has ŷ = y.
+
+The target is to make ŷ close to y in the bad cases. Training minimises the CVaR 95% of the loss L = y − ŷ, written as in Rockafellar and Uryasev (2000):
+
+$$\min_{\theta,\,w}\; w + \frac{1}{1 - 0.95}\,\mathbb{E}\big[\max(L - w,\,0)\big]$$
+
+θ are the network's weights and w is one extra number learned with them; at the minimum, w is the 95% VaR. We use CVaR rather than mean squared error because a bank cares about large losses, while squared error punishes a lucky gain as much as a loss. RMSE is still reported, but the hedger is not trained on it.
+
+The holdings, the trading gains, the costs and the Black–Scholes delta are all written in PyTorch, so the gradient of the loss flows back through all 21 trading days to the weights.
+
+Training: 20,000 paths of one world (W1, W2, W3 or the simulated test market), hedged daily at 5 bp. Each step uses a random batch of 4,096 paths; 800 steps of Adam, with the learning rate starting at 0.003 and falling smoothly to zero. One hedger is trained per world, and each is tested on paths or real trades it has never seen.
+
+#### Generator
+
+This network is trained on labelled data. For each day t of the history:
+
+| | What it is |
+|---|---|
+| Input xₜ | three numbers: today's log return rₜ = ln(Sₜ / Sₜ₋₁), today's change in log implied volatility Δaₜ, and the log implied volatility aₜ itself (a = ln of the 30-day ATM IV) |
+| Label yₜ | the next day's actual pair (rₜ₊₁, Δaₜ₊₁), read from the history |
+| Output ŷₜ | a probability distribution for yₜ, not a single number: a mix of four two-dimensional normal distributions |
+
+Inputs are standardised with the mean and standard deviation of the training days. A GRU with 32 units reads the days in order and keeps a memory of the past, so the forecast for tomorrow depends on recent volatility and recent falls, not only on today. A linear layer turns that memory into 24 numbers: for each of the four normals, a weight, two means, two standard deviations and one correlation between return and volatility change.
+
+We predict a distribution rather than a point forecast for two reasons. A point forecast of tomorrow's return is close to zero and has no randomness, so it cannot be used to make paths. And a mix of normals can have fat tails and a negative link between returns and volatility, which a single normal cannot.
+
+Loss: the negative log-likelihood of the label, −mean ln p̂(yₜ | x₁, …, xₜ). It is low when the days that actually happened look likely under the predicted distribution. This is the training curve in Figures 4a and 5a.
+
+Training: random 128-day windows from the training part of the history, 64 windows per step, 800 steps of Adam at a learning rate of 0.001, with gradient clipping. The last 20% of the training history is held out, and we keep the weights with the lowest loss on it (early stopping). On real data, all of this uses only days before the test period.
+
+Making a path: the network first reads a random 60-day stretch of the real history, to start in a realistic volatility regime. Then it draws one day at a time from its predicted distribution and feeds the drawn day back in as the next input. Prices come from adding up the drawn returns, starting at 100, and implied volatility from adding up the drawn changes. This gives the 20,000 one-month paths of W3.
 
 ### Fair comparisons
 
@@ -97,7 +169,7 @@ All numbers: `results/w2_grid.csv`.
 
 ## 4. W3: a neural network that imitates the market, and where to train a hedger
 
-The generator. A recurrent neural network (a GRU with 32 units) reads recent daily returns and implied-volatility changes and predicts the distribution of tomorrow's return and volatility change as a mix of four bell curves (a mixture density network). It is trained on the first 80% of a ten-year daily history from the simulated test market and stopped where it best predicts the last 20%. New paths are generated day by day, each continuing a random 60-day stretch of the history.
+The generator. The GRU network described in section 1 is trained on the first 80% of a ten-year daily history from the simulated test market, and we keep the weights that best predict the last 20%. New paths are generated day by day, each continuing a random 60-day stretch of the history.
 
 <p align="center"><img src="../results/figures/w3_history.png" width="860" alt="Figure 4a"></p>
 
@@ -283,7 +355,7 @@ Remaining gaps in the real data:
 
 ## Reproducing
 
-Everything here comes from the notebooks: `uv sync`, then run `notebooks/01`–`04` in order (see the README). Notebook 04 first needs the WRDS data prepared with `scripts/prepare_wrds.py`. Tables are in `results/*.csv`, figures in `results/figures/`. Simulations use fixed random seeds, so their numbers reproduce exactly.
+Everything here comes from the notebooks: `uv sync`, then run `notebooks/01`–`04` in order (see the README). Notebook 04 first needs the WRDS data: `scripts/pull_spx_wrds.py` and `scripts/pull_spx_options_0_70_band30.py` download it (a WRDS account is needed), and `scripts/prepare_wrds.py` turns it into the tables `hedging.real` reads. Tables are in `results/*.csv`, figures in `results/figures/`. Simulations use fixed random seeds, so their numbers reproduce exactly.
 
 ## References
 
