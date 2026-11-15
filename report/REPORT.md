@@ -77,19 +77,7 @@ S is the price, K the strike, τ the time left in years and T = 21 trading days.
 
 Output: one number c, a correction to delta. The new holding is φ = N(d₁) + c units of the underlying. The network is a plain feed-forward net, 5 inputs → 64 → 64 → 1 output, with SiLU activations in the hidden layers. The same weights are used on every day of every path. The output layer starts at zero, so before training the deep hedger is exactly the delta hedge; training only moves it away from delta if that lowers the loss.
 
-What y, ŷ and the target are. There is no "correct holding" to compare each day's output with. The label is at the level of a whole path:
-
-- y is what the bank must pay at expiry: the call's payoff, max(S_T − K, 0). Once a path is drawn, y is known.
-- ŷ is what the bank has at expiry from selling and hedging: ŷ = premium + Σᵢ φᵢ (Sᵢ₊₁ − Sᵢ) − trading costs. It is built from the network's 21 decisions on that path, so it plays the role of the network's prediction of y.
-- The hedging error is ŷ − y, the same number we report everywhere (see Notation and units). A perfect hedge has ŷ = y.
-
-The target is to make ŷ close to y in the bad cases. Training minimises the CVaR 95% of the loss L = y − ŷ, written as in Rockafellar and Uryasev (2000):
-
-$$\min_{\theta,\,w}\; w + \frac{1}{1 - 0.95}\,\mathbb{E}\big[\max(L - w,\,0)\big]$$
-
-θ are the network's weights and w is one extra number learned with them; at the minimum, w is the 95% VaR. We use CVaR rather than mean squared error because a bank cares about large losses, while squared error punishes a lucky gain as much as a loss. RMSE is still reported, but the hedger is not trained on it.
-
-The holdings, the trading gains, the costs and the Black–Scholes delta are all written in PyTorch, so the gradient of the loss flows back through all 21 trading days to the weights.
+What it is told to improve (the target, and what y and ŷ are) is set out in section 4, where the deep hedgers are first used.
 
 Training: 20,000 paths of one world (W1, W2, W3 or the simulated test market), hedged daily at 5 bp. Each step uses a random batch of 4,096 paths; 800 steps of Adam, with the learning rate starting at 0.003 and falling smoothly to zero. One hedger is trained per world, and each is tested on paths or real trades it has never seen.
 
@@ -100,14 +88,14 @@ This network is trained on labelled data. For each day t of the history:
 | | What it is |
 |---|---|
 | Input xₜ | three numbers: today's log return rₜ = ln(Sₜ / Sₜ₋₁), today's change in log implied volatility Δaₜ, and the log implied volatility aₜ itself (a = ln of the 30-day ATM IV) |
-| Label yₜ | the next day's actual pair (rₜ₊₁, Δaₜ₊₁), read from the history |
-| Output ŷₜ | a probability distribution for yₜ, not a single number: a mix of four two-dimensional normal distributions |
+| Label zₜ | the next day's actual pair (rₜ₊₁, Δaₜ₊₁), read from the history |
+| Output p̂ₜ | a probability distribution for zₜ, not a single number: a mix of four two-dimensional normal distributions |
 
 Inputs are standardised with the mean and standard deviation of the training days. A GRU with 32 units reads the days in order and keeps a memory of the past, so the forecast for tomorrow depends on recent volatility and recent falls, not only on today. A linear layer turns that memory into 24 numbers: for each of the four normals, a weight, two means, two standard deviations and one correlation between return and volatility change.
 
 We predict a distribution rather than a point forecast for two reasons. A point forecast of tomorrow's return is close to zero and has no randomness, so it cannot be used to make paths. And a mix of normals can have fat tails and a negative link between returns and volatility, which a single normal cannot.
 
-Loss: the negative log-likelihood of the label, −mean ln p̂(yₜ | x₁, …, xₜ). It is low when the days that actually happened look likely under the predicted distribution. This is the training curve in Figures 4a and 5a.
+Loss: the negative log-likelihood of the label, −mean ln p̂ₜ(zₜ), where p̂ₜ is predicted from x₁, …, xₜ. It is low when the days that actually happened look likely under the predicted distribution. This is the training curve in Figures 4a and 5a.
 
 Training: random 128-day windows from the training part of the history, 64 windows per step, 800 steps of Adam at a learning rate of 0.001, with gradient clipping. The last 20% of the training history is held out, and we keep the weights with the lowest loss on it (early stopping). On real data, all of this uses only days before the test period.
 
@@ -193,12 +181,18 @@ The generator matches the volatility level, the leverage effect and the size of 
 
 *Figure 4b. Five generated paths.*
 
-What the AI hedger is told to improve. On each training path the hedger sells the call, takes the premium, and holds some amount of the underlying each day. At expiry we compare two numbers:
+What the AI hedger is told to improve. There is no correct holding to compare each day's output with, so the hedger is judged on a whole path. On each training path it sells the call, takes the premium, and on day i holds φᵢ units of the underlying, as set by the network (section 1). At expiry we compare two numbers:
 
-- y, what it must pay: the call's payoff, max(S_T − K, 0).
-- ŷ, what it has: the premium (about 2.3), plus the gains and losses on its daily holdings, minus trading costs. This is the hedger's attempt to reproduce y.
+- y, what it must pay: the call's payoff, max(S_T − K, 0). Once the path is drawn, y is known; it plays the role of the label.
+- ŷ, what it has: ŷ = premium + Σᵢ φᵢ (Sᵢ₊₁ − Sᵢ) − trading costs, that is the premium (about 2.3) plus the gains on its 21 daily holdings, minus costs. This is the hedger's attempt to reproduce y.
 
-The gap ŷ − y is the hedging error, and y − ŷ is the loss. The hedger is told one thing: make the average loss over the worst 5% of paths (CVaR 95) as small as possible. It is not told to copy delta, and it is not trained on RMSE. Because costs are inside ŷ, it learns by itself when a trade is not worth making. Every hedger below uses the same network, the same objective and the same 800 training steps; only the paths it learns from differ. So any difference between them in the table comes from the world it was trained in. (Section 1 has the inputs, the network and the formula.)
+ŷ − y is the hedging error we report everywhere, and L = y − ŷ is the loss. The hedger is told one thing: make the average loss over the worst 5% of paths (CVaR 95) as small as possible. Following Rockafellar and Uryasev (2000), training solves
+
+$$\min_{\theta,\,w}\; w + \frac{1}{1 - 0.95}\,\mathbb{E}\big[\max(L - w,\,0)\big]$$
+
+where θ are the network's weights and w is one extra number learned with them (at the minimum, w is the 95% VaR). It is not told to copy delta, and it is not trained on RMSE: a bank cares about large losses, while squared error punishes a lucky gain as much as a loss. Because costs are inside ŷ, it learns by itself when a trade is not worth making. The holdings, gains, costs and Black–Scholes delta are all written in PyTorch, so the gradient of the loss flows back through all 21 days to the weights.
+
+Every hedger below uses the same network, the same objective and the same training; only the paths it learns from differ. So any difference between them comes from the world it was trained in.
 
 Transfer test. A deep hedger is trained in each world (all fitted to the same history); then every strategy is tested on 5,000 fresh paths of the simulated test market, hedging daily at 5 bp:
 
